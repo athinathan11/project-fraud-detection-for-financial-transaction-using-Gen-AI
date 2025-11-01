@@ -1,0 +1,230 @@
+
+
+1. 🧠 **Full LightGBM + LLM explainability prototype (Python)**
+2. 📋 **Detailed `evaluation_checklist.md` for governance & model review**
+
+---
+
+## 🧠 1. `fraud_pipeline.py`
+
+```python
+#!/usr/bin/env python3
+"""
+Fraud Detection Pipeline — Production Prototype
+------------------------------------------------
+Includes:
+- Offline feature generation
+- LightGBM model training + evaluation
+- LLM-based explanation stub (safe PII handling)
+"""
+
+import os
+import argparse
+import pandas as pd
+import numpy as np
+import joblib
+from sklearn.metrics import (
+    precision_recall_curve, auc, roc_auc_score, average_precision_score
+)
+import lightgbm as lgb
+
+
+# -------------------------------------------------------
+# Data Loading
+# -------------------------------------------------------
+def load_data(path="data/transactions.csv"):
+    df = pd.read_csv(path, parse_dates=["timestamp"])
+    if "is_fraud" not in df.columns:
+        raise ValueError("Dataset must include `is_fraud` column.")
+    return df
+
+
+# -------------------------------------------------------
+# Feature Engineering
+# -------------------------------------------------------
+def feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.sort_values(["account_id", "timestamp"])
+    df["hour"] = df["timestamp"].dt.hour
+    df["amount_log"] = np.log1p(df["amount"])
+    # Rolling 24-hour features per account
+    df["txn_24h_count"] = (
+        df.groupby("account_id")["timestamp"]
+        .rolling("24H", on="timestamp").count()
+        .reset_index(0, drop=True).fillna(0)
+    )
+    df["txn_24h_sum"] = (
+        df.groupby("account_id")["amount"]
+        .rolling("24H", on="timestamp").sum()
+        .reset_index(0, drop=True).fillna(0)
+    )
+    df = df.fillna(0)
+    return df
+
+
+# -------------------------------------------------------
+# Model Training & Evaluation
+# -------------------------------------------------------
+def train_model(df, features, label_col="is_fraud"):
+    df = df.sort_values("timestamp")
+    split = int(len(df) * 0.8)
+    train, test = df.iloc[:split], df.iloc[split:]
+    X_train, y_train = train[features], train[label_col]
+    X_test, y_test = test[features], test[label_col]
+
+    print(f"Training set: {len(train)} | Test set: {len(test)}")
+
+    dtrain = lgb.Dataset(X_train, label=y_train)
+    dvalid = lgb.Dataset(X_test, label=y_test)
+
+    params = {
+        "objective": "binary",
+        "metric": ["auc", "average_precision"],
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "seed": 42,
+        "verbosity": -1
+    }
+
+    model = lgb.train(
+        params,
+        dtrain,
+        valid_sets=[dtrain, dvalid],
+        valid_names=["train", "valid"],
+        num_boost_round=200,
+        early_stopping_rounds=20,
+        verbose_eval=20,
+    )
+
+    preds = model.predict(X_test)
+    roc_auc = roc_auc_score(y_test, preds)
+    pr_auc = average_precision_score(y_test, preds)
+    precision, recall, _ = precision_recall_curve(y_test, preds)
+    pr_curve_auc = auc(recall, precision)
+
+    print(f"\n✅ ROC-AUC: {roc_auc:.4f}")
+    print(f"✅ Average Precision (PR-AUC): {pr_auc:.4f}")
+    print(f"✅ PR Curve AUC: {pr_curve_auc:.4f}")
+
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(model, "models/lgb_model.pkl")
+    joblib.dump({"features": features}, "models/metadata.pkl")
+    print("✅ Model and metadata saved to 'models/'")
+
+    return model
+
+
+# -------------------------------------------------------
+# LLM Explanation (Safe Placeholder)
+# -------------------------------------------------------
+def explain_with_llm(case_features: dict):
+    """
+    Pseudocode stub for integrating an LLM safely.
+    In real deployment, redact sensitive fields and call the LLM securely.
+    """
+    prompt = f"""
+You are a fraud analyst assistant. Given these anonymized transaction features:
+{case_features}
+
+Provide:
+1. A concise explanation of which features most likely contributed to possible fraud.
+2. Three next investigative steps.
+3. A confidence level (low / medium / high) and why.
+"""
+    # Example integration:
+    # from openai import OpenAI
+    # client = OpenAI()
+    # response = client.chat.completions.create(
+    #     model="gpt-5",
+    #     messages=[{"role": "system", "content": "You are a fraud analyst."},
+    #               {"role": "user", "content": prompt}]
+    # )
+    # return response.choices[0].message["content"]
+
+    return "LLM explanation placeholder (safe stub)."
+
+
+# -------------------------------------------------------
+# Main
+# -------------------------------------------------------
+def main(mode="train"):
+    os.makedirs("models", exist_ok=True)
+    df = load_data()
+    df = feature_engineer(df)
+    features = ["amount_log", "hour", "txn_24h_count", "txn_24h_sum"]
+
+    if mode == "train":
+        train_model(df, features)
+    elif mode == "explain":
+        sample = df.iloc[-1]
+        case_feats = {f: float(sample[f]) for f in features}
+        explanation = explain_with_llm(case_feats)
+        print(explanation)
+    else:
+        raise ValueError("Unknown mode. Choose from: train, explain.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["train", "explain"], default="train")
+    args = parser.parse_args()
+    main(args.mode)
+```
+
+---
+
+## 📋 2. `evaluation_checklist.md`
+
+```markdown
+# Fraud Detection Pipeline — Evaluation Checklist
+
+## 1. Data Integrity
+- [ ] Validate no missing or duplicated transaction IDs
+- [ ] Check timestamp ordering (strictly increasing per account)
+- [ ] Confirm no leakage of future data in rolling features
+- [ ] Handle missing values, negative or zero amounts properly
+
+## 2. Feature Engineering
+- [ ] Verify all time-based aggregations (e.g., 24h window) are computed per account
+- [ ] Inspect correlation matrix to identify redundant or leaky features
+- [ ] Confirm consistent log-scaling and units across datasets
+- [ ] Validate derived features are reproducible
+
+## 3. Model Development
+- [ ] Use consistent random seeds for reproducibility
+- [ ] Apply time-based validation (not random splits)
+- [ ] Compare baseline models (logistic regression vs LightGBM)
+- [ ] Calibrate model output probabilities
+
+## 4. Performance Evaluation
+- [ ] Record metrics: ROC-AUC, PR-AUC, Average Precision, F1-score
+- [ ] Evaluate by account segment (e.g., new vs. returning)
+- [ ] Plot precision–recall and ROC curves for inspection
+- [ ] Validate performance stability across time periods
+
+## 5. LLM Explainability
+- [ ] Ensure PII redaction / hashing before sending to LLM
+- [ ] Log all explanation requests with metadata (account_id hashed, timestamp)
+- [ ] Evaluate LLM outputs for consistency and factuality
+- [ ] Review explanations with fraud analysts quarterly
+
+## 6. Operational Readiness
+- [ ] Version control for models and feature sets
+- [ ] Implement automated retraining schedule
+- [ ] Add monitoring for data drift and feature distributions
+- [ ] Document all model assumptions and feature definitions
+
+## 7. Governance & Compliance
+- [ ] Ensure GDPR/CCPA compliance (no personal data sent externally)
+- [ ] Include human-in-the-loop override procedures
+- [ ] Maintain model risk management documentation
+- [ ] Obtain sign-off from fraud analytics and compliance teams
+```
+
+---
+
+Would you like me to extend this further with:
+
+* ✅ **Automated model evaluation report generation (HTML or Markdown)**, or
+* ✅ **Add explainability visualization (e.g., SHAP summary plots)?**
+
+Either would make this a strong internal prototype for review.
